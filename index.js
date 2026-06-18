@@ -410,6 +410,29 @@ async function enviarMensaje(phone, texto) {
   }
 }
 
+// ── ALERTAS A DUEÑO/PATRICIA ──────────────────────────────
+let ultimaAlerta = {}; // evita spamear la misma alerta repetidas veces
+
+async function alertarAdmins(motivo, detalle) {
+  const ahora = Date.now();
+  const clave = motivo;
+  // no repetir la misma alerta antes de 5 minutos
+  if (ultimaAlerta[clave] && ahora - ultimaAlerta[clave] < 5 * 60 * 1000) return;
+  ultimaAlerta[clave] = ahora;
+
+  const texto = `⚠️ LEO tuvo un problema:\n${motivo}\n${detalle ? "Detalle: " + detalle.slice(0, 200) : ""}`;
+  for (const admin of CONFIG.admins) {
+    try {
+      await axios.post(
+        `${CONFIG.greenApi.base()}/sendMessage/${CONFIG.greenApi.token}`,
+        { chatId: `${admin}@c.us`, message: texto }
+      );
+    } catch (e) {
+      console.error(`[alertarAdmins] No se pudo avisar a ${admin}:`, e.message);
+    }
+  }
+}
+
 // ── WEBHOOK ───────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -449,6 +472,7 @@ app.post("/webhook", async (req, res) => {
         return;
       } catch (e) {
         console.error("Error MP:", e.message);
+        await alertarAdmins(`No se pudo generar el link de pago para el cliente ${phone}`, e.message);
         await enviarMensaje(phone, textoFinal);
         return;
       }
@@ -462,6 +486,7 @@ app.post("/webhook", async (req, res) => {
         console.log(`[FUDO] Pedido enviado para ${phone}`);
       } catch (e) {
         console.error("Error Fudo:", e.message);
+        await alertarAdmins(`No se pudo mandar el pedido a Fudo (cliente ${phone}). Revisar manualmente.`, e.message);
       }
     }
 
@@ -473,12 +498,15 @@ app.post("/webhook", async (req, res) => {
         console.log(`[FUDO] Pedido efectivo enviado para ${phone}`);
       } catch (e) {
         console.error("Error Fudo:", e.message);
+        await alertarAdmins(`No se pudo mandar el pedido a Fudo (cliente ${phone}, pago efectivo). Revisar manualmente.`, e.message);
       }
     }
 
     await enviarMensaje(phone, textoFinal);
   } catch (err) {
-    console.error("Error webhook:", err.response?.data ? JSON.stringify(err.response.data) : err.message, err.stack);
+    const detalle = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.error("Error webhook:", detalle, err.stack);
+    await alertarAdmins(`LEO no pudo responderle a un cliente (${req.body?.senderData?.sender || "número desconocido"})`, detalle);
   }
 });
 
