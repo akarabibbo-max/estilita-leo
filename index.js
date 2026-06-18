@@ -29,6 +29,7 @@ const CONFIG = {
     pagos: "Mercado Pago, MODO, Transferencia, Efectivo (10% OFF)",
     whatsapp: "5491131720719",
   },
+  admins: ["5491127834662", "5491170665358"], // dueño y Patricia: pueden gestionar stock
 };
 
 // ── MENÚ COMPLETO ──────────────────────────────────────────
@@ -148,6 +149,60 @@ const menuTexto = Object.values(MENU).map(cat => {
   return `*${cat.titulo}*\n${items}`;
 }).join("\n\n");
 
+// ── STOCK (disponibilidad de productos) ───────────────────
+const fs = require("fs");
+const STOCK_FILE = "/tmp/stock.json";
+
+function cargarStock() {
+  try {
+    return JSON.parse(fs.readFileSync(STOCK_FILE, "utf8"));
+  } catch {
+    return {}; // vacío = todo disponible
+  }
+}
+
+function guardarStock(stock) {
+  fs.writeFileSync(STOCK_FILE, JSON.stringify(stock, null, 2));
+}
+
+let STOCK = cargarStock(); // { "Tacos Mariscos": false } = sin stock
+
+function estaDisponible(nombreProducto) {
+  return STOCK[nombreProducto] !== false;
+}
+
+function listaTodosLosProductos() {
+  const lista = [];
+  Object.values(MENU).forEach(cat => cat.items.forEach(i => lista.push(i.n)));
+  return lista;
+}
+
+function buscarProductoPorNombreAproximado(texto) {
+  const textoLower = texto.toLowerCase();
+  const todos = listaTodosLosProductos();
+  // match exacto primero
+  let match = todos.find(n => textoLower.includes(n.toLowerCase()));
+  if (match) return match;
+  // match parcial por palabras clave
+  const palabras = textoLower.split(/\s+/).filter(p => p.length > 3);
+  match = todos.find(n => {
+    const nLower = n.toLowerCase();
+    return palabras.some(p => nLower.includes(p));
+  });
+  return match || null;
+}
+
+function menuTextoConStock() {
+  return Object.values(MENU).map(cat => {
+    const items = cat.items
+      .filter(i => estaDisponible(i.n))
+      .map(i => `  - ${i.n}: $${i.p.toLocaleString("es-AR")}`)
+      .join("\n");
+    if (!items) return null;
+    return `*${cat.titulo}*\n${items}`;
+  }).filter(Boolean).join("\n\n");
+}
+
 // ── ESTADO DE CONVERSACIONES ──────────────────────────────
 const sesiones = {}; // { [phone]: { historial, carrito, estado, nombre, direccion, modo } }
 
@@ -156,6 +211,35 @@ function getSesion(phone) {
     sesiones[phone] = { historial: [], carrito: [], estado: "inicio", nombre: null, direccion: null, modo: null };
   }
   return sesiones[phone];
+}
+
+// ── COMANDOS DE ADMINISTRADOR (stock) ─────────────────────
+function esAdmin(phone) {
+  return CONFIG.admins.includes(phone);
+}
+
+async function manejarComandoAdmin(phone, texto) {
+  const textoLower = texto.toLowerCase();
+
+  const esQuitar = /sac|quit|no hay|se acab|agot|elimin|baj/i.test(textoLower);
+  const esPoner = /volv|pon|hay de nuevo|repon|activ|disponible de nuevo|agreg/i.test(textoLower);
+
+  if (!esQuitar && !esPoner) return null; // no es un comando de stock, seguir flujo normal
+
+  const producto = buscarProductoPorNombreAproximado(texto);
+  if (!producto) {
+    return `No identifiqué el producto. Decime el nombre tal cual está en el menú, ej: "sacá Tacos Mariscos".`;
+  }
+
+  if (esQuitar) {
+    STOCK[producto] = false;
+    guardarStock(STOCK);
+    return `Listo, saqué *${producto}* del menú. No se va a ofrecer hasta que avises que volvió.`;
+  } else {
+    STOCK[producto] = true;
+    guardarStock(STOCK);
+    return `Listo, *${producto}* está disponible de nuevo.`;
+  }
 }
 
 // ── CLAUDE ─────────────────────────────────────────────────
@@ -173,7 +257,7 @@ DATOS DEL LOCAL:
 - Medios de pago: ${CONFIG.negocio.pagos}
 
 MENÚ COMPLETO CON PRECIOS:
-${menuTexto}
+${menuTextoConStock()}
 
 ESTADO ACTUAL DEL CLIENTE:
 - Carrito: ${sesion.carrito.length === 0 ? "vacío" : sesion.carrito.map(i => `${i.cantidad}x ${i.nombre} ($${(i.precio * i.cantidad).toLocaleString("es-AR")})`).join(", ")}
@@ -200,7 +284,9 @@ REGLAS:
 - Cuando el pedido esté confirmado, terminá tu respuesta con: [PEDIDO_LISTO]
 - Cuando necesites generar el link de pago, terminá con: [GENERAR_PAGO]
 - Cuando el pedido esté pagado y listo para cocina, terminá con: [ENVIAR_FUDO]
-- No uses markdown, emojis con moderación, respuestas cortas y directas`;
+- No uses markdown, emojis con moderación, respuestas cortas y directas
+- IMPORTANTE: Si este es el PRIMER mensaje del cliente (saludo tipo "hola", "buenas", etc.) y todavía no hay nada en el carrito, respondé presentándote brevemente como LEO de Estilita y preguntá directamente: "¿Querés delivery o retirás en el local?" — y ofrecé mostrar el menú si quiere verlo primero. Sé proactivo, no esperes a que el cliente pregunte qué hay.
+- Nunca respondas solo con un saludo genérico sin avanzar la conversación hacia tomar el pedido.`;
 
   sesion.historial.push({ role: "user", content: mensajeUsuario });
 
@@ -237,7 +323,7 @@ function actualizarCarrito(phone, msgUsuario, respClaude) {
   const textoLower = msgUsuario.toLowerCase();
   Object.values(MENU).forEach(cat => {
     cat.items.forEach(item => {
-      if (textoLower.includes(item.n.toLowerCase())) {
+      if (textoLower.includes(item.n.toLowerCase()) && estaDisponible(item.n)) {
         const existe = sesion.carrito.find(i => i.nombre === item.n);
         if (existe) { existe.cantidad++; }
         else { sesion.carrito.push({ nombre: item.n, precio: item.p, cantidad: 1 }); }
@@ -338,6 +424,15 @@ app.post("/webhook", async (req, res) => {
     if (phone === CONFIG.negocio.whatsapp) return; // ignorar mensajes propios
 
     console.log(`[${phone}] → ${texto}`);
+
+    // Si es admin (dueño o Patricia), chequear si es un comando de stock primero
+    if (esAdmin(phone)) {
+      const respuestaAdmin = await manejarComandoAdmin(phone, texto);
+      if (respuestaAdmin) {
+        await enviarMensaje(phone, respuestaAdmin);
+        return;
+      }
+    }
 
     const sesion = getSesion(phone);
     const respuesta = await consultarClaude(phone, texto);
