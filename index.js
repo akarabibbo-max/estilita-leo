@@ -204,6 +204,8 @@ REGLAS:
 
   sesion.historial.push({ role: "user", content: mensajeUsuario });
 
+  console.log(`[consultarClaude] Llamando a Anthropic API, key presente: ${!!CONFIG.anthropic.key}`);
+
   const response = await axios.post(
     "https://api.anthropic.com/v1/messages",
     {
@@ -213,7 +215,12 @@ REGLAS:
       messages: sesion.historial,
     },
     { headers: { "x-api-key": CONFIG.anthropic.key, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
-  );
+  ).catch(e => {
+    console.error(`[consultarClaude] FALLO:`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
+    throw e;
+  });
+
+  console.log(`[consultarClaude] Respuesta recibida OK`);
 
   const respuesta = response.data.content[0].text;
   sesion.historial.push({ role: "assistant", content: respuesta });
@@ -306,10 +313,15 @@ async function enviarPedidoFudo(sesion, phone) {
 
 // ── GREEN API ──────────────────────────────────────────────
 async function enviarMensaje(phone, texto) {
-  await axios.post(
-    `${CONFIG.greenApi.base()}/sendMessage/${CONFIG.greenApi.token}`,
-    { chatId: `${phone}@c.us`, message: texto }
-  );
+  try {
+    const url = `${CONFIG.greenApi.base()}/sendMessage/${CONFIG.greenApi.token}`;
+    console.log(`[enviarMensaje] POST ${url}`);
+    const res = await axios.post(url, { chatId: `${phone}@c.us`, message: texto });
+    console.log(`[enviarMensaje] OK:`, JSON.stringify(res.data));
+  } catch (e) {
+    console.error(`[enviarMensaje] FALLO:`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
+    throw e;
+  }
 }
 
 // ── WEBHOOK ───────────────────────────────────────────────
@@ -371,7 +383,7 @@ app.post("/webhook", async (req, res) => {
 
     await enviarMensaje(phone, textoFinal);
   } catch (err) {
-    console.error("Error webhook:", err.message);
+    console.error("Error webhook:", err.response?.data ? JSON.stringify(err.response.data) : err.message, err.stack);
   }
 });
 
