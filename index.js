@@ -315,7 +315,16 @@ CÓMO MOSTRAR EL MENÚ (muy importante):
 - Si el cliente menciona algo específico ("tacos", "algo venezolano", "para tomar"), mostrá SOLO esa categoría completa con precios.
 - Si el cliente pide una recomendación o dice "no sé qué pedir", sugerí 2-3 opciones populares de distintas categorías (ej: un taco, un combo, una bebida) en vez de listar todo.
 - Si el cliente pide explícitamente "el menú completo" o "todo el menú": ahí SÍ generá la lista completa de TODAS las categorías con TODOS los productos y precios, sin resumir ni cortar nada — el sistema se encarga de dividirlo en varios mensajes de WhatsApp automáticamente, así que no tengas miedo de que sea largo.
-- Mantené las listas de productos en formato simple con guiones, una línea por ítem, sin texto extra entre medio.`;
+- Mantené las listas de productos en formato simple con guiones, una línea por ítem, sin texto extra entre medio.
+
+ESTADO OCULTO DEL PEDIDO (el cliente NUNCA ve esto, se borra automáticamente — pero es OBLIGATORIO ponerlo en TODAS tus respuestas, sin excepción):
+Al final de cada respuesta agregá, en su propia línea, este bloque:
+[ESTADO]{"items":[{"n":"NOMBRE EXACTO DEL PRODUCTO COMO FIGURA EN EL MENU","c":CANTIDAD}],"modo":"delivery" o "retiro" o null,"nombre":"nombre del cliente" o null,"direccion":"dirección completa que dio el cliente" o null,"pago":"mercadopago" o "modo" o "transferencia" o "efectivo" o null}[/ESTADO]
+Reglas:
+- "items" es SIEMPRE el carrito completo y actualizado a este punto de la charla (no solo lo nuevo de este mensaje). Si el cliente sacó algo, no va más en la lista. Si el carrito está vacío, "items": [].
+- El nombre en "n" tiene que coincidir EXACTO con el del menú de arriba.
+- Si todavía no tenés un dato (nombre, dirección, modo, pago), poné null. Nunca inventes un dato que el cliente no dio.
+- Este bloque va siempre, incluso en un simple saludo.`;
 
   sesion.historial.push({ role: "user", content: mensajeUsuario });
 
@@ -337,31 +346,57 @@ CÓMO MOSTRAR EL MENÚ (muy importante):
 
   console.log(`[consultarClaude] Respuesta recibida OK`);
 
-  const respuesta = response.data.content[0].text;
+  const respuestaCruda = response.data.content[0].text;
+  const { texto: respuesta, estado } = extraerEstado(respuestaCruda);
   sesion.historial.push({ role: "assistant", content: respuesta });
 
-  // Actualizar carrito desde la respuesta (simple parsing)
-  actualizarCarrito(phone, mensajeUsuario, respuesta);
+  // Actualizar carrito, nombre, dirección y pago con el estado real que reportó Claude
+  aplicarEstado(phone, estado);
 
   return respuesta;
 }
 
-function actualizarCarrito(phone, msgUsuario, respClaude) {
+// ── PRODUCTOS PLANOS (para validar nombres del ESTADO) ─────
+const PRODUCTOS_PLANOS = Object.values(MENU).flatMap(cat => cat.items);
+
+function extraerEstado(respuestaCruda) {
+  const match = respuestaCruda.match(/\[ESTADO\]([\s\S]*?)\[\/ESTADO\]/);
+  if (!match) {
+    console.error("[extraerEstado] Claude no incluyó el bloque [ESTADO] en su respuesta");
+    return { texto: respuestaCruda.trim(), estado: null };
+  }
+  const texto = respuestaCruda.replace(match[0], "").trim();
+  try {
+    const estado = JSON.parse(match[1].trim());
+    return { texto, estado };
+  } catch (e) {
+    console.error("[extraerEstado] Bloque ESTADO mal formado, se ignora:", e.message, match[1]);
+    return { texto, estado: null };
+  }
+}
+
+function aplicarEstado(phone, estado) {
+  if (!estado) return; // si no vino o vino mal formado, no tocamos lo que ya teníamos guardado
   const sesion = getSesion(phone);
-  // Buscar ítems del menú mencionados por el usuario
-  const textoLower = msgUsuario.toLowerCase();
-  Object.values(MENU).forEach(cat => {
-    cat.items.forEach(item => {
-      if (textoLower.includes(item.n.toLowerCase()) && estaDisponible(item.n)) {
-        const existe = sesion.carrito.find(i => i.nombre === item.n);
-        if (existe) { existe.cantidad++; }
-        else { sesion.carrito.push({ nombre: item.n, precio: item.p, cantidad: 1 }); }
-      }
-    });
-  });
-  // Detectar modo
-  if (textoLower.includes("delivery") || textoLower.includes("envío") || textoLower.includes("domicilio")) sesion.modo = "delivery";
-  if (textoLower.includes("retiro") || textoLower.includes("paso a buscar") || textoLower.includes("local")) sesion.modo = "retiro";
+
+  if (Array.isArray(estado.items)) {
+    sesion.carrito = estado.items
+      .filter(i => i && i.n && Number(i.c) > 0)
+      .map(i => {
+        const producto = PRODUCTOS_PLANOS.find(p => p.n.toLowerCase() === String(i.n).toLowerCase());
+        if (!producto) {
+          console.error(`[aplicarEstado] Producto no reconocido del menú: "${i.n}"`);
+          return null;
+        }
+        if (!estaDisponible(producto.n)) return null; // por las dudas, no vender algo sin stock
+        return { nombre: producto.n, precio: producto.p, cantidad: Number(i.c) };
+      })
+      .filter(Boolean);
+  }
+  if (estado.modo) sesion.modo = estado.modo;
+  if (estado.nombre) sesion.nombre = estado.nombre;
+  if (estado.direccion) sesion.direccion = estado.direccion;
+  if (estado.pago) sesion.metodoPago = estado.pago;
 }
 
 // ── MERCADO PAGO ───────────────────────────────────────────
