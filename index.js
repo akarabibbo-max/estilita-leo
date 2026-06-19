@@ -307,7 +307,15 @@ REGLAS:
 - Cuando el pedido esté pagado y listo para cocina, terminá con: [ENVIAR_FUDO]
 - No uses markdown, emojis con moderación, respuestas cortas y directas
 - IMPORTANTE: Si este es el PRIMER mensaje del cliente (saludo tipo "hola", "buenas", etc.) y todavía no hay nada en el carrito, respondé presentándote brevemente como LEO de Estilita y preguntá directamente: "¿Querés delivery o retirás en el local?" — y ofrecé mostrar el menú si quiere verlo primero. Sé proactivo, no esperes a que el cliente pregunte qué hay.
-- Nunca respondas solo con un saludo genérico sin avanzar la conversación hacia tomar el pedido.`;
+- Nunca respondas solo con un saludo genérico sin avanzar la conversación hacia tomar el pedido.
+
+CÓMO MOSTRAR EL MENÚ (muy importante):
+- NUNCA tires las 130+ opciones juntas de una si el cliente no lo pidió explícitamente. Eso abruma y el cliente no lee nada.
+- Si el cliente pide "ver el menú" sin especificar, mostrá primero solo las CATEGORÍAS disponibles (los títulos: Botanas, Tacos, Burritos XL, Quesadillas XL, De la Casa, Combos, Extras, Arepas Guayoyo, Empanadas Venezolanas, Cachapas Guayoyo, Pepitos Guayoyo, Boxes Venezolanos, Postres, Bebidas sin Alcohol, Cervezas, Tragos y Cócteles) y preguntá cuál le interesa ver.
+- Si el cliente menciona algo específico ("tacos", "algo venezolano", "para tomar"), mostrá SOLO esa categoría completa con precios.
+- Si el cliente pide una recomendación o dice "no sé qué pedir", sugerí 2-3 opciones populares de distintas categorías (ej: un taco, un combo, una bebida) en vez de listar todo.
+- Si el cliente pide explícitamente "el menú completo" o "todo el menú": ahí SÍ generá la lista completa de TODAS las categorías con TODOS los productos y precios, sin resumir ni cortar nada — el sistema se encarga de dividirlo en varios mensajes de WhatsApp automáticamente, así que no tengas miedo de que sea largo.
+- Mantené las listas de productos en formato simple con guiones, una línea por ítem, sin texto extra entre medio.`;
 
   sesion.historial.push({ role: "user", content: mensajeUsuario });
 
@@ -317,7 +325,7 @@ REGLAS:
     "https://api.anthropic.com/v1/messages",
     {
       model: "claude-sonnet-4-6",
-      max_tokens: 1024,
+      max_tokens: 4096,
       system: systemPrompt,
       messages: sesion.historial,
     },
@@ -419,15 +427,37 @@ async function enviarPedidoFudo(sesion, phone) {
 }
 
 // ── GREEN API ──────────────────────────────────────────────
+const LIMITE_WHATSAPP = 3500; // dejamos margen por debajo del límite real de WhatsApp (~4096)
+
+function dividirMensajeLargo(texto) {
+  if (texto.length <= LIMITE_WHATSAPP) return [texto];
+  const bloques = [];
+  const lineas = texto.split("\n");
+  let actual = "";
+  for (const linea of lineas) {
+    if ((actual + "\n" + linea).length > LIMITE_WHATSAPP) {
+      if (actual) bloques.push(actual);
+      actual = linea;
+    } else {
+      actual = actual ? actual + "\n" + linea : linea;
+    }
+  }
+  if (actual) bloques.push(actual);
+  return bloques;
+}
+
 async function enviarMensaje(phone, texto) {
-  try {
-    const url = `${CONFIG.greenApi.base()}/sendMessage/${CONFIG.greenApi.token}`;
-    console.log(`[enviarMensaje] POST ${url}`);
-    const res = await axios.post(url, { chatId: `${phone}@c.us`, message: texto });
-    console.log(`[enviarMensaje] OK:`, JSON.stringify(res.data));
-  } catch (e) {
-    console.error(`[enviarMensaje] FALLO:`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
-    throw e;
+  const partes = dividirMensajeLargo(texto);
+  for (const parte of partes) {
+    try {
+      const url = `${CONFIG.greenApi.base()}/sendMessage/${CONFIG.greenApi.token}`;
+      console.log(`[enviarMensaje] POST ${url} (${parte.length} chars)`);
+      const res = await axios.post(url, { chatId: `${phone}@c.us`, message: parte });
+      console.log(`[enviarMensaje] OK:`, JSON.stringify(res.data));
+    } catch (e) {
+      console.error(`[enviarMensaje] FALLO:`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
+      throw e;
+    }
   }
 }
 
