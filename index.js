@@ -329,7 +329,7 @@ CÓMO MOSTRAR EL MENÚ (muy importante):
       system: systemPrompt,
       messages: sesion.historial,
     },
-    { headers: { "x-api-key": CONFIG.anthropic.key, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    { headers: { "x-api-key": CONFIG.anthropic.key, "anthropic-version": "2023-06-01", "content-type": "application/json" }, timeout: 30000 }
   ).catch(e => {
     console.error(`[consultarClaude] FALLO:`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
     throw e;
@@ -452,7 +452,7 @@ async function enviarMensaje(phone, texto) {
     try {
       const url = `${CONFIG.greenApi.base()}/sendMessage/${CONFIG.greenApi.token}`;
       console.log(`[enviarMensaje] POST ${url} (${parte.length} chars)`);
-      const res = await axios.post(url, { chatId: `${phone}@c.us`, message: parte });
+      const res = await axios.post(url, { chatId: `${phone}@c.us`, message: parte }, { timeout: 15000 });
       console.log(`[enviarMensaje] OK:`, JSON.stringify(res.data));
     } catch (e) {
       console.error(`[enviarMensaje] FALLO:`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
@@ -563,6 +563,19 @@ app.post("/webhook", async (req, res) => {
 
 // ── HEALTH CHECK ───────────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "LEO online", negocio: CONFIG.negocio.nombre }));
+
+// ── PROTECCIÓN CONTRA CAÍDAS INESPERADAS ──────────────────
+// Si algo falla fuera de los try/catch normales, lo logueamos y avisamos,
+// pero NO dejamos que el proceso entero se caiga (eso cortaría a todos los clientes).
+process.on("uncaughtException", (err) => {
+  console.error("[FATAL] Excepción no capturada:", err.message, err.stack);
+  alertarAdmins("Error crítico inesperado en LEO (uncaughtException)", err.message).catch(() => {});
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[FATAL] Promesa rechazada sin capturar:", reason);
+  alertarAdmins("Error crítico inesperado en LEO (unhandledRejection)", String(reason)).catch(() => {});
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`LEO corriendo en puerto ${PORT}`));
