@@ -308,6 +308,7 @@ REGLAS:
 - No uses markdown, emojis con moderación, respuestas cortas y directas
 - IMPORTANTE: Si este es el PRIMER mensaje del cliente (saludo tipo "hola", "buenas", etc.) y todavía no hay nada en el carrito, respondé presentándote brevemente como LEO de Estilita y preguntá directamente: "¿Querés delivery o retirás en el local?" — y ofrecé mostrar el menú si quiere verlo primero. Sé proactivo, no esperes a que el cliente pregunte qué hay.
 - Nunca respondas solo con un saludo genérico sin avanzar la conversación hacia tomar el pedido.
+- MUY IMPORTANTE - mensajes que NO son pedidos: Sos un asistente SOLO para pedidos de comida. Si el mensaje claramente NO tiene que ver con pedir comida del local (por ejemplo: un proveedor ofreciendo productos o insumos, alguien hablando de facturas/pagos a proveedores, ventas o publicidad de terceros, temas administrativos, mensajes personales de conocidos, o cualquier cosa ajena a hacer un pedido), NO respondas como si fueras a tomar un pedido. En ese caso respondé ÚNICAMENTE con la etiqueta [NO_ES_PEDIDO] y nada más (sin texto, sin saludo, sin el bloque ESTADO). El sistema se encarga de avisarle al dueño. Ante la duda, si parece que la persona podría querer comer algo, atendé normal: esta regla es solo para casos claros de que NO es un cliente.
 
 CÓMO MOSTRAR EL MENÚ (muy importante):
 - NUNCA tires las 130+ opciones juntas de una si el cliente no lo pidió explícitamente. Eso abruma y el cliente no lee nada.
@@ -527,6 +528,15 @@ app.post("/webhook", async (req, res) => {
     if (!body || body.typeWebhook !== "incomingMessageReceived") return;
     if (!body.messageData || body.messageData.typeMessage !== "textMessage") return;
 
+    // IGNORAR GRUPOS: solo atender chats privados de personas.
+    // Los grupos de WhatsApp tienen un chatId que termina en "@g.us".
+    // Las personas terminan en "@c.us". LEO nunca debe responder en grupos.
+    const chatId = body.senderData?.chatId || "";
+    if (chatId.endsWith("@g.us")) {
+      console.log(`[GRUPO IGNORADO] ${chatId} → no se responde en grupos`);
+      return;
+    }
+
     const phone = body.senderData?.sender?.replace("@c.us", "");
     const texto = body.messageData.textMessageData?.textMessage;
     if (!phone || !texto) return;
@@ -545,6 +555,20 @@ app.post("/webhook", async (req, res) => {
 
     const sesion = getSesion(phone);
     const respuesta = await consultarClaude(phone, texto);
+
+    // NO ES UN PEDIDO: si LEO detectó que el mensaje no es de un cliente
+    // (proveedor, administrativo, conocido, etc.), NO le respondemos con el bot.
+    // En cambio, le avisamos al dueño para que decida si contesta a mano.
+    if (respuesta.includes("[NO_ES_PEDIDO]")) {
+      console.log(`[NO_ES_PEDIDO] ${phone} → no se responde, se avisa al dueño`);
+      // borrar la sesión que se acaba de crear, para que no quede basura en memoria
+      delete sesiones[phone];
+      await alertarAdmins(
+        `Te escribió ${phone} y no parece un pedido. Fijate si querés responder a mano.`,
+        `Mensaje: "${texto}"`
+      );
+      return;
+    }
 
     let textoFinal = respuesta;
 
