@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const db = require("./db"); // memoria persistente (PostgreSQL)
 const app = express();
 app.use(express.json());
 
@@ -163,6 +164,13 @@ function cargarStock() {
 
 function guardarStock(stock) {
   fs.writeFileSync(STOCK_FILE, JSON.stringify(stock, null, 2));
+  // También persistir en la base, para que no se pierda al reiniciar.
+  // No usamos await acá para no frenar la respuesta al admin; corre en segundo plano.
+  if (db.estaDisponibleDB()) {
+    for (const producto of Object.keys(stock)) {
+      db.guardarStockItem(producto, stock[producto]).catch(() => {});
+    }
+  }
 }
 
 let STOCK = cargarStock(); // { "Tacos Mariscos": false } = sin stock
@@ -598,6 +606,8 @@ app.post("/webhook", async (req, res) => {
         console.error("Error Fudo:", e.message);
         await alertarAdmins(`No se pudo mandar el pedido a Fudo (cliente ${phone}). Revisar manualmente.`, e.message);
       }
+      // Guardar en la memoria persistente (no rompe el flujo si falla)
+      await guardarPedidoEnMemoria(phone, sesion);
     }
 
     // Pedido listo (efectivo)
@@ -610,6 +620,8 @@ app.post("/webhook", async (req, res) => {
         console.error("Error Fudo:", e.message);
         await alertarAdmins(`No se pudo mandar el pedido a Fudo (cliente ${phone}, pago efectivo). Revisar manualmente.`, e.message);
       }
+      // Guardar en la memoria persistente (no rompe el flujo si falla)
+      await guardarPedidoEnMemoria(phone, sesion);
     }
 
     await enviarMensaje(phone, textoFinal);
@@ -619,6 +631,32 @@ app.post("/webhook", async (req, res) => {
     await alertarAdmins(`LEO no pudo responderle a un cliente (${req.body?.senderData?.sender || "número desconocido"})`, detalle);
   }
 });
+
+// ── MEMORIA PERSISTENTE: guardar pedido + cliente ─────────
+// Toma la sesión actual del cliente y la registra en la base.
+// Está envuelto en try/catch: si la base falla, LEO sigue normal.
+async function guardarPedidoEnMemoria(phone, sesion) {
+  try {
+    if (!db.estaDisponibleDB()) return;
+    const items = sesion.carrito || sesion.items || [];
+    const total = (Array.isArray(items))
+      ? items.reduce((acc, it) => acc + (Number(it.precio || 0) * Number(it.cantidad || 1)), 0)
+      : null;
+    await db.registrarPedido({
+      telefono: phone,
+      nombre: sesion.nombre || null,
+      items: items,
+      total: total || null,
+      modo: sesion.modo || null,
+      direccion: sesion.direccion || null,
+      pago: sesion.pago || sesion.metodoPago || null,
+    });
+    await db.guardarCliente(phone, sesion.nombre || null, sesion.direccion || null);
+    console.log(`[DB] Pedido y cliente guardados para ${phone}`);
+  } catch (e) {
+    console.error("[DB] guardarPedidoEnMemoria:", e.message);
+  }
+}
 
 // ── HEALTH CHECK ───────────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "LEO online", negocio: CONFIG.negocio.nombre }));
@@ -637,4 +675,22 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`LEO corriendo en puerto ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`LEO corriendo en puerto ${PORT}`);
+  // Conectar la memoria persistente: crea las tablas y migra el stock actual.
+  // Si la base no responde, LEO sigue funcionando con su memoria de siempre.
+  try {
+    const ok = await db.inicializar();
+    if (ok) {
+      await db.migrarStock(STOCK);
+      // Si la base ya tiene stock guardado, lo usamos como fuente de verdad.
+      const stockDB = await db.cargarStockDB();
+      if (stockDB && Object.keys(stockDB).length > 0) {
+        STOCK = stockDB;
+        console.log(`[DB] Stock cargado desde la base: ${Object.keys(stockDB).length} productos.`);
+      }
+    }
+  } catch (e) {
+    console.error("[DB] Error al inicializar la memoria persistente:", e.message);
+  }
+});
