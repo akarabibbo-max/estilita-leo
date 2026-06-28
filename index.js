@@ -333,7 +333,9 @@ Reglas:
 - "items" es SIEMPRE el carrito completo y actualizado a este punto de la charla (no solo lo nuevo de este mensaje). Si el cliente sacó algo, no va más en la lista. Si el carrito está vacío, "items": [].
 - El nombre en "n" tiene que coincidir EXACTO con el del menú de arriba.
 - Si todavía no tenés un dato (nombre, dirección, modo, pago), poné null. Nunca inventes un dato que el cliente no dio.
-- Este bloque va siempre, incluso en un simple saludo.`;
+- Este bloque va siempre, incluso en un simple saludo.
+
+⚠️ REGLA CRÍTICA FINAL — LEÉ ESTO ANTES DE ENVIAR: Tu respuesta NO está completa sin el bloque [ESTADO]...[/ESTADO] al final. Si no lo incluís, el pedido se pierde y el cliente queda sin atención. SIEMPRE, en CADA mensaje que le mandes al cliente (saludo, pregunta, confirmación, lo que sea), terminá con el bloque [ESTADO] en su propia línea. Esto no es opcional. Revisá mentalmente antes de responder: "¿incluí el bloque [ESTADO]?". Si la respuesta es no, agregalo.`;
 
   sesion.historial.push({ role: "user", content: mensajeUsuario });
 
@@ -355,8 +357,40 @@ Reglas:
 
   console.log(`[consultarClaude] Respuesta recibida OK`);
 
-  const respuestaCruda = response.data.content[0].text;
-  const { texto: respuesta, estado } = extraerEstado(respuestaCruda);
+  let respuestaCruda = response.data.content[0].text;
+  let { texto: respuesta, estado } = extraerEstado(respuestaCruda);
+
+  // SEGURO: si LEO se olvidó del bloque [ESTADO], se lo pedimos de nuevo una vez.
+  // Esto evita perder el hilo del pedido cuando la IA omite el bloque obligatorio.
+  if (estado === null && !respuestaCruda.includes("[NO_ES_PEDIDO]")) {
+    console.warn("[consultarClaude] Falta [ESTADO], reintentando una vez...");
+    try {
+      const reintento = await axios.post(
+        "https://api.anthropic.com/v1/messages",
+        {
+          model: "claude-sonnet-4-6",
+          max_tokens: 4096,
+          system: systemPrompt,
+          messages: [
+            ...sesion.historial,
+            { role: "assistant", content: respuestaCruda },
+            { role: "user", content: "Reenviá EXACTAMENTE la misma respuesta anterior pero agregando al final el bloque [ESTADO]{...}[/ESTADO] obligatorio con el carrito y datos actuales. No cambies el texto para el cliente." },
+          ],
+        },
+        { headers: { "x-api-key": CONFIG.anthropic.key, "anthropic-version": "2023-06-01", "content-type": "application/json" }, timeout: 30000 }
+      );
+      const crudaReintento = reintento.data.content[0].text;
+      const r2 = extraerEstado(crudaReintento);
+      if (r2.estado !== null) {
+        respuesta = r2.texto;
+        estado = r2.estado;
+        console.log("[consultarClaude] Reintento OK: [ESTADO] recuperado");
+      }
+    } catch (e) {
+      console.error("[consultarClaude] Reintento falló:", e.message);
+    }
+  }
+
   sesion.historial.push({ role: "assistant", content: respuesta });
 
   // Actualizar carrito, nombre, dirección y pago con el estado real que reportó Claude
