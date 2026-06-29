@@ -275,9 +275,41 @@ async function manejarComandoAdmin(phone, texto) {
 async function consultarClaude(phone, mensajeUsuario) {
   const sesion = getSesion(phone);
 
+  // PERSONALIZACIÓN: si es el comienzo de una charla, buscamos si el cliente ya pidió antes.
+  // Esto se hace una sola vez por sesión (cuando el historial está vacío).
+  let contextoCliente = "";
+  if (sesion.historial.length === 0) {
+    try {
+      const cliente = await db.buscarCliente(phone);
+      if (cliente && cliente.nombre) {
+        const pedidos = await db.pedidosDeCliente(phone, 3);
+        let resumenPedidos = "";
+        if (pedidos && pedidos.length > 0) {
+          const items = pedidos.flatMap(p => {
+            try { return (typeof p.items === "string" ? JSON.parse(p.items) : p.items) || []; }
+            catch { return []; }
+          }).map(i => i.n || i.nombre).filter(Boolean);
+          if (items.length > 0) {
+            const unicos = [...new Set(items)].slice(0, 5);
+            resumenPedidos = ` Suele pedir: ${unicos.join(", ")}.`;
+          }
+        }
+        contextoCliente = `
+CLIENTE CONOCIDO (ya pidió antes — usá esto para personalizar con calidez, sin sonar invasivo):
+- Nombre: ${cliente.nombre}
+- ${cliente.direccion ? `Última dirección: ${cliente.direccion}` : "Sin dirección guardada"}
+- Pedidos hechos: ${cliente.total_pedidos || "varios"}.${resumenPedidos}
+Saludalo por su nombre de forma natural (ej: "¡Hola ${cliente.nombre}! ¿Cómo va?"). Si pregunta o querés sugerir, podés tener en cuenta lo que suele pedir, pero sin presionar ni repetir todo su historial.`;
+      }
+    } catch (e) {
+      console.error("[personalización] No se pudo cargar el cliente:", e.message);
+    }
+  }
+
   const systemPrompt = `Sos LEO, el asistente virtual de ${CONFIG.negocio.nombre}.
 Sos simpático, eficiente y hablás en argentino (usá "vos", "che", etc.).
 Atendés pedidos de comida mexicana y venezolana para delivery o retiro en local.
+${contextoCliente}
 
 DATOS DEL LOCAL:
 - Dirección: ${CONFIG.negocio.direccion}
