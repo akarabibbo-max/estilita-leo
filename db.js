@@ -68,6 +68,13 @@ async function inicializar() {
         actualizado  TIMESTAMPTZ DEFAULT now()
       );
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS precios (
+        producto     TEXT PRIMARY KEY,
+        precio       NUMERIC NOT NULL,
+        actualizado  TIMESTAMPTZ DEFAULT now()
+      );
+    `);
     dbLista = true;
     console.log("[DB] Tablas listas (clientes, pedidos, stock).");
     return true;
@@ -205,6 +212,38 @@ function estaDisponibleDB() {
   return dbLista;
 }
 
+// ── PRECIOS MODIFICADOS ───────────────────────────────────
+// Guarda un precio cambiado por el dueño. Queda permanente (no se borra al reiniciar).
+async function guardarPrecio(producto, precio) {
+  if (!dbLista) return false;
+  try {
+    await pool.query(
+      `INSERT INTO precios (producto, precio, actualizado)
+       VALUES ($1, $2, now())
+       ON CONFLICT (producto) DO UPDATE SET precio = $2, actualizado = now()`,
+      [producto, precio]
+    );
+    return true;
+  } catch (e) {
+    console.error("[DB] guardarPrecio:", e.message);
+    return false;
+  }
+}
+
+// Trae todos los precios modificados como {producto: precio}.
+async function cargarPreciosDB() {
+  if (!dbLista) return null;
+  try {
+    const r = await pool.query("SELECT producto, precio FROM precios");
+    const out = {};
+    for (const row of r.rows) out[row.producto] = Number(row.precio);
+    return out;
+  } catch (e) {
+    console.error("[DB] cargarPreciosDB:", e.message);
+    return null;
+  }
+}
+
 module.exports = {
   inicializar,
   buscarCliente,
@@ -215,4 +254,6 @@ module.exports = {
   guardarStockItem,
   migrarStock,
   estaDisponibleDB,
+  guardarPrecio,
+  cargarPreciosDB,
 };
