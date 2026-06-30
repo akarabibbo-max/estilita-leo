@@ -145,6 +145,30 @@ const MENU = {
   ]},
 };
 
+// ── PRECIOS MODIFICADOS POR EL DUEÑO ──────────────────────
+// Guarda los precios cambiados por WhatsApp. Se aplican sobre el MENU.
+// Persisten en la base de datos (no se pierden al reiniciar).
+const PRECIOS_MOD = {}; // { "Nombre Producto": precioNuevo }
+
+// Devuelve el precio actual de un producto (el modificado si existe, si no el del menú).
+function precioActual(nombreProducto) {
+  if (PRECIOS_MOD[nombreProducto] != null) return PRECIOS_MOD[nombreProducto];
+  for (const cat of Object.values(MENU)) {
+    const item = cat.items.find(i => i.n === nombreProducto);
+    if (item) return item.p;
+  }
+  return null;
+}
+
+// Aplica todos los precios modificados sobre el objeto MENU (pisa el precio viejo).
+function aplicarPreciosAlMenu() {
+  for (const cat of Object.values(MENU)) {
+    for (const item of cat.items) {
+      if (PRECIOS_MOD[item.n] != null) item.p = PRECIOS_MOD[item.n];
+    }
+  }
+}
+
 const menuTexto = Object.values(MENU).map(cat => {
   const items = cat.items.map(i => `  - ${i.n}: $${i.p.toLocaleString("es-AR")}`).join("\n");
   return `*${cat.titulo}*\n${items}`;
@@ -247,13 +271,59 @@ function esAdmin(phone) {
   return CONFIG.admins.includes(phone);
 }
 
-async function manejarComandoAdmin(phone, texto) {
-  const textoLower = texto.toLowerCase();
+// Guarda cambios que esperan que el dueño confirme (ej: cambio de precio).
+// { [phone]: { tipo: "precio", producto, precioNuevo, precioViejo } }
+const confirmacionesPendientes = {};
 
+async function manejarComandoAdmin(phone, texto) {
+  const textoLower = texto.toLowerCase().trim();
+
+  // ─── 1. ¿Hay un cambio esperando confirmación de este admin? ───
+  const pendiente = confirmacionesPendientes[phone];
+  if (pendiente) {
+    const dijoSi = /^(s[ií]|dale|confirm|ok|listo|correcto|va|hac[eé]lo|aplicá|aplicalo)/i.test(textoLower);
+    const dijoNo = /^(no|cancel|dej[aá]|olvid|mejor no|nada)/i.test(textoLower);
+    if (dijoSi) {
+      delete confirmacionesPendientes[phone];
+      if (pendiente.tipo === "precio") {
+        PRECIOS_MOD[pendiente.producto] = pendiente.precioNuevo;
+        aplicarPreciosAlMenu();
+        if (db.estaDisponibleDB()) db.guardarPrecio(pendiente.producto, pendiente.precioNuevo).catch(() => {});
+        return `✅ Listo. *${pendiente.producto}* ahora sale $${pendiente.precioNuevo.toLocaleString("es-AR")}.`;
+      }
+    }
+    if (dijoNo) {
+      delete confirmacionesPendientes[phone];
+      return `Ok, no cambié nada. Quedó como estaba.`;
+    }
+    // Si no dijo claramente sí o no, le recordamos qué está pendiente
+    if (pendiente.tipo === "precio") {
+      return `Tenés un cambio pendiente: *${pendiente.producto}* de $${pendiente.precioViejo.toLocaleString("es-AR")} a $${pendiente.precioNuevo.toLocaleString("es-AR")}. ¿Confirmás? (sí / no)`;
+    }
+  }
+
+  // ─── 2. ¿Es un comando de PRECIO? ───
+  // Detecta patrones tipo "X sale 8500", "poné la arepa a 8500", "precio de X 8500"
+  const mencionaPrecio = /precio|sale|cuesta|vale|cobr|\$|\ba\s+\d|pon[eé].*\d|cambi.*\d/i.test(textoLower);
+  const numeroMatch = texto.match(/(\d[\d.\s]{2,})/); // un número de al menos 3 dígitos (precio realista)
+  if (mencionaPrecio && numeroMatch) {
+    const precioNuevo = parseInt(numeroMatch[1].replace(/[.\s]/g, ""), 10);
+    if (precioNuevo >= 100 && precioNuevo <= 1000000) {
+      const producto = buscarProductoPorNombreAproximado(texto);
+      if (!producto) {
+        return `Entendí que querés cambiar un precio a $${precioNuevo.toLocaleString("es-AR")}, pero no identifiqué el producto. Decime el nombre como está en el menú, ej: "Arepa de Reina sale 8500".`;
+      }
+      const precioViejo = precioActual(producto);
+      confirmacionesPendientes[phone] = { tipo: "precio", producto, precioNuevo, precioViejo };
+      return `Querés cambiar *${producto}* de $${precioViejo.toLocaleString("es-AR")} a $${precioNuevo.toLocaleString("es-AR")}. ¿Confirmás? (respondé *sí* o *no*)`;
+    }
+  }
+
+  // ─── 3. ¿Es un comando de STOCK? ───
   const esQuitar = /sac|quit|no hay|se acab|agot|elimin|baj/i.test(textoLower);
   const esPoner = /volv|pon|hay de nuevo|repon|activ|disponible de nuevo|agreg/i.test(textoLower);
 
-  if (!esQuitar && !esPoner) return null; // no es un comando de stock, seguir flujo normal
+  if (!esQuitar && !esPoner) return null; // no es comando reconocido, seguir flujo normal
 
   const producto = buscarProductoPorNombreAproximado(texto);
   if (!producto) {
@@ -308,6 +378,13 @@ Saludalo por su nombre de forma natural (ej: "¡Hola ${cliente.nombre}! ¿Cómo 
 
   const systemPrompt = `Sos LEO, el asistente virtual de ${CONFIG.negocio.nombre}.
 Sos simpático, eficiente y hablás en argentino (usá "vos", "che", etc.).
+
+CÓMO HABLÁS (muy importante):
+- Respuestas CORTAS y al grano. 1 o 2 frases por mensaje, salvo que tengas que mostrar el menú o varios precios.
+- Sonás como una persona real del local, NO como un robot. Nada de respuestas largas, formales o con listas interminables.
+- No repitas saludos ni fórmulas en cada mensaje. Si ya saludaste, seguí la charla natural.
+- Una pregunta por vez. No abrumes con muchas opciones juntas.
+- Cálido pero directo. Como atendería un dueño canchero de un local de barrio: rápido, claro, amable.
 Atendés pedidos de comida mexicana y venezolana para delivery o retiro en local.
 ${contextoCliente}
 
@@ -754,6 +831,13 @@ app.listen(PORT, async () => {
       if (stockDB && Object.keys(stockDB).length > 0) {
         STOCK = stockDB;
         console.log(`[DB] Stock cargado desde la base: ${Object.keys(stockDB).length} productos.`);
+      }
+      // Cargar precios modificados por el dueño y aplicarlos al menú.
+      const preciosDB = await db.cargarPreciosDB();
+      if (preciosDB && Object.keys(preciosDB).length > 0) {
+        Object.assign(PRECIOS_MOD, preciosDB);
+        aplicarPreciosAlMenu();
+        console.log(`[DB] Precios modificados cargados: ${Object.keys(preciosDB).length} productos.`);
       }
     }
   } catch (e) {
