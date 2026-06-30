@@ -275,6 +275,11 @@ function esAdmin(phone) {
 // { [phone]: { tipo: "precio", producto, precioNuevo, precioViejo } }
 const confirmacionesPendientes = {};
 
+// Conversaciones donde el dueño intervino y tomó el control.
+// LEO no responde a estos clientes en la charla actual. Se limpia cuando
+// el cliente arranca una conversación nueva (sesión reseteada).
+const pausadosPorDueno = {}; // { [phone]: timestamp }
+
 async function manejarComandoAdmin(phone, texto) {
   const textoLower = texto.toLowerCase().trim();
 
@@ -676,6 +681,22 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
   try {
     const body = req.body;
+
+    // INTERVENCIÓN DEL DUEÑO: si el mensaje salió DESDE el teléfono del negocio
+    // (o sea, el dueño le escribió directo a un cliente), LEO se calla con ese cliente.
+    // Green API manda esto como "outgoingMessageReceived" cuando se activa la opción
+    // "Receive webhooks on messages sent from phone".
+    if (body && body.typeWebhook === "outgoingMessageReceived") {
+      const destino = body.senderData?.chatId?.replace("@c.us", "");
+      // Solo aplica a chats privados (no grupos) y si hay un destinatario válido
+      if (destino && body.senderData?.chatId?.endsWith("@c.us") && !esAdmin(destino)) {
+        pausadosPorDueno[destino] = Date.now();
+        delete sesiones[destino]; // cortar cualquier hilo que LEO tuviera con ese cliente
+        console.log(`[PAUSA DUEÑO] Vos le escribiste a ${destino} → LEO no responde más en esta charla.`);
+      }
+      return;
+    }
+
     if (!body || body.typeWebhook !== "incomingMessageReceived") return;
     if (!body.messageData || body.messageData.typeMessage !== "textMessage") return;
 
@@ -692,6 +713,21 @@ app.post("/webhook", async (req, res) => {
     const texto = body.messageData.textMessageData?.textMessage;
     if (!phone || !texto) return;
     if (phone === CONFIG.negocio.whatsapp) return; // ignorar mensajes propios
+
+    // ¿El dueño tomó esta conversación? Si sí, LEO no responde a este cliente.
+    // La pausa dura mientras la charla está "viva". Si el cliente vuelve a escribir
+    // muchas horas después (charla nueva otro día), LEO lo atiende de nuevo.
+    if (pausadosPorDueno[phone]) {
+      const horasDesdePausa = (Date.now() - pausadosPorDueno[phone]) / (1000 * 60 * 60);
+      if (horasDesdePausa < 8) {
+        console.log(`[PAUSADO] ${phone} → el dueño tomó esta charla, LEO no responde.`);
+        return;
+      } else {
+        // Pasó suficiente tiempo: es una charla nueva, LEO vuelve a atender.
+        delete pausadosPorDueno[phone];
+        console.log(`[PAUSA LIBERADA] ${phone} → charla nueva, LEO vuelve a atender.`);
+      }
+    }
 
     console.log(`[${phone}] → ${texto}`);
 
